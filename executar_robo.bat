@@ -8,7 +8,7 @@ if not exist "%PYTHON_ROBO%" (
   echo ERRO: ambiente Python nao encontrado em:
   echo %PYTHON_ROBO%
   echo.
-  echo Recrie o ambiente conforme a secao Instalacao do README.md.
+  echo Rode install.bat nesta pasta e tente de novo.
   pause
   exit /b 1
 )

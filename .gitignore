@@ -220,5 +220,6 @@ __marimo__/
 # Projeto Olist - sessao local e logs de execucao
 chrome-perfil-olist/
 logs/
+*.zip
 Thumbs.db
 .DS_Store

@@ -6,16 +6,20 @@ Fluxo por pedido: clicar na linha → **editar** → preencher **Desconto** com 
 
 ## Instalação (uma vez)
 
-No PowerShell:
+Pré-requisitos no Windows: **Python 3.10+** (com “Add python.exe to PATH”) e **Google Chrome**.
+
+Descompacte o zip, abra a pasta e dê duplo clique em **`install.bat`**.
+
+Ele cria o `.venv`, instala o Playwright e baixa o suporte interno. Precisa de internet nessa etapa.
+
+> O robô **não** abre um Chromium próprio: ele se conecta no **Chrome já aberto** (porta 9222).
+
+Alternativa no PowerShell:
 
 ```powershell
 cd C:\dstr-prog\olist\robo-desconto-ped
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m playwright install chromium
+.\install.bat
 ```
-
-> O robô **não** abre um Chromium próprio: ele se conecta no **Chrome já aberto** (porta 9222).
 
 ## Como usar
 
