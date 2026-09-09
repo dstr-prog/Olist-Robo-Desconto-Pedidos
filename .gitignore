@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Projeto Olist - sessao local e logs de execucao
+chrome-perfil-olist/
+logs/
+Thumbs.db
+.DS_Store
