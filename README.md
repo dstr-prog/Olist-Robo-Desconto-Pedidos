@@ -51,8 +51,11 @@ Simulação (abre cada pedido, registra o que faria e volta **sem salvar**):
 
 ## Regras
 
-- Processa **somente os pedidos visíveis** na grid atual.
-- Se o campo **Desconto** já tiver valor (diferente de zero), o pedido é ignorado.
+- Processa **todos os pedidos do filtro atual**, pagina por pagina (50 por vez).
+- Começa na **página em que a grid estiver** e avança até a última.
+- Se a **Natureza da operação** for `Venda de mercadorias de terceiros para contribuinte`, o pedido é ignorado.
+- Se o **Desconto** já estiver em percentual (sufixo `%`, ex.: `10%`), o pedido é ignorado.
+- Se o **Desconto** estiver em valor (ex.: `1,00`) ou vazio, o percentual informado é gravado no lugar.
 - O **Total da venda** não fica abaixo de **R$ 10,00**. Se o percentual informado derrubaria o total, ele é reduzido só naquele pedido.
 - Pedidos que já estão em R$ 10,00 (ou menos) também são ignorados.
 

@@ -25,7 +25,9 @@ if errorlevel 1 (
 echo.
 echo Informe o percentual de desconto a aplicar em cada pedido.
 echo Exemplos: 10    10,5    10%%
-echo Pedidos que ja tiverem desconto preenchido serao ignorados.
+echo Pula natureza "Venda de mercadorias de terceiros para contribuinte".
+echo Pula desconto que ja estiver em percentual (sufixo %%).
+echo Desconto em valor (ex: 1,00) sera substituido pelo percentual.
 echo O Total da venda nao ficara abaixo de R$ 10,00.
 echo.
 set /p PERCENTUAL="Percentual: "
@@ -36,7 +38,7 @@ if "%PERCENTUAL%"=="" (
 )
 
 echo.
-echo ATENCAO: a proxima etapa edita os pedidos visiveis na tela, um a um.
+echo ATENCAO: a proxima etapa edita os pedidos do filtro, pagina por pagina.
 choice /C SN /N /M "Deseja aplicar o desconto de %PERCENTUAL%%% ? [S/N] "
 if errorlevel 2 exit /b 0
 

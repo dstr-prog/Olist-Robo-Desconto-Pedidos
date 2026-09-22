@@ -19,6 +19,7 @@ import math
 import re
 import sys
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -29,11 +30,13 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout, sync_pl
 CDP_URL = "http://127.0.0.1:9222"
 URL_PEDIDOS = "erp.olist.com/vendas"
 TOTAL_MINIMO_PADRAO = 10.00
+NATUREZA_SEM_DESCONTO = "venda de mercadorias de terceiros para contribuinte"
 
 TIMEOUT_ACAO_MS = 30_000
 TIMEOUT_SALVAR_MS = 120_000
 DELAY_ENTRE_CLIQUES_S = 0.6
 DELAY_APOS_VOLTAR_S = 1.2
+DELAY_APOS_PAGINACAO_S = 1.5
 DELAY_APOS_CALCULO_S = 0.8
 MAX_ERROS_SEGUIDOS = 3
 
@@ -95,13 +98,18 @@ def parse_percentual(texto: str) -> float:
     return valor
 
 
-def desconto_ja_preenchido(texto: str | None) -> bool:
-    if texto is None:
-        return False
-    bruto = str(texto).strip()
-    if not bruto:
-        return False
-    return parse_numero_br(bruto) > 0.0001
+def normalizar_texto(texto: str | None) -> str:
+    s = unicodedata.normalize("NFD", texto or "")
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def natureza_bloqueia_desconto(texto: str | None) -> bool:
+    return normalizar_texto(texto) == NATUREZA_SEM_DESCONTO
+
+
+def desconto_eh_percentual(*textos: str | None) -> bool:
+    return any("%" in str(texto or "") for texto in textos)
 
 
 def encontrar_pagina_pedidos(browser) -> Page:
@@ -146,6 +154,94 @@ def listar_pedidos_visiveis(page: Page) -> list[dict]:
             cliente: ((tr.querySelector('td.tline.footable-visible:nth-of-type(8)') || {}).innerText || '').trim()
         }))"""
     )
+
+
+def ler_info_paginacao(page: Page) -> dict:
+    return page.evaluate(
+        """() => {
+            const pag = document.querySelector('ul.pagination.hidden-xs')
+                || document.querySelector('ul.pagination');
+            if (!pag) {
+                return { paginaAtual: 1, totalPaginas: 1, temProxima: false, linhas: 0 };
+            }
+
+            const active = pag.querySelector('li.active a.link-pg');
+            const paginaAtual = active
+                ? parseInt(active.getAttribute('data-pagina') || '1', 10)
+                : 1;
+            const numeros = Array.from(pag.querySelectorAll('a.link-pg[data-pagina]'))
+                .map((a) => parseInt(a.getAttribute('data-pagina') || '0', 10))
+                .filter((n) => n > 0);
+            const totalPaginas = numeros.length ? Math.max(...numeros) : paginaAtual;
+            const pnext = pag.querySelector('li.pnext');
+            const temProxima = !!(pnext && !pnext.classList.contains('disabled'));
+            const linhas = document.querySelectorAll('table.thumb-table tbody tr[idvenda]').length;
+
+            return { paginaAtual, totalPaginas, temProxima, linhas };
+        }"""
+    )
+
+
+def aguardar_mudanca_pagina(page: Page, pagina_anterior: int, id_antes: str | None) -> None:
+    page.wait_for_function(
+        """(args) => {
+            if (document.body.classList.contains('wait-block-open')) return false;
+            const pag = document.querySelector('ul.pagination.hidden-xs')
+                || document.querySelector('ul.pagination');
+            const active = pag && pag.querySelector('li.active a.link-pg');
+            const paginaAtual = active
+                ? parseInt(active.getAttribute('data-pagina') || '0', 10)
+                : 0;
+            if (paginaAtual > args.paginaAnterior) return true;
+            const idAtual = (document.querySelector('table.thumb-table tbody tr[idvenda]') || {})
+                .getAttribute('idvenda');
+            return !!(idAtual && args.idAntes && idAtual !== args.idAntes);
+        }""",
+        arg={"paginaAnterior": pagina_anterior, "idAntes": id_antes or ""},
+        timeout=TIMEOUT_ACAO_MS,
+    )
+    esperar_sem_aguarde(page)
+    time.sleep(DELAY_APOS_PAGINACAO_S)
+
+
+def ir_para_proxima_pagina(page: Page) -> bool:
+    if not na_lista(page):
+        voltar_para_lista(page)
+
+    info = ler_info_paginacao(page)
+    pagina_atual = int(info.get("paginaAtual") or 1)
+    if not info.get("temProxima"):
+        return False
+
+    id_antes = page.evaluate(
+        """() => {
+            const tr = document.querySelector('table.thumb-table tbody tr[idvenda]');
+            return tr ? String(tr.getAttribute('idvenda') || tr.id || '') : '';
+        }"""
+    )
+
+    proxima = pagina_atual + 1
+    btn = page.locator("ul.pagination.hidden-xs li.pnext a.link-pg").first
+    if btn.count() == 0:
+        btn = page.locator(f'ul.pagination.hidden-xs a.link-pg[data-pagina="{proxima}"]').first
+    if btn.count() == 0:
+        btn = page.locator(f'ul.pagination a.link-pg[data-pagina="{proxima}"]').first
+    if btn.count() == 0:
+        log.warning("Botao da pagina %s nao encontrado.", proxima)
+        return False
+
+    log.info("Indo para a pagina %s...", proxima)
+    btn.click(force=True, timeout=TIMEOUT_ACAO_MS)
+    aguardar_mudanca_pagina(page, pagina_atual, id_antes)
+
+    info_depois = ler_info_paginacao(page)
+    log.info(
+        "Pagina atual: %s/%s | linhas=%s",
+        info_depois.get("paginaAtual"),
+        info_depois.get("totalPaginas"),
+        info_depois.get("linhas"),
+    )
+    return int(info_depois.get("paginaAtual") or 0) > pagina_atual
 
 
 def na_lista(page: Page) -> bool:
@@ -218,17 +314,35 @@ def abrir_pedido(page: Page, pedido: dict) -> None:
     time.sleep(DELAY_ENTRE_CLIQUES_S)
 
 
-def ler_desconto_atual(page: Page) -> str:
+def _texto_campo_view_e_valor(page: Page, campo_id: str) -> dict:
     return page.evaluate(
-        """() => {
-            const el = document.getElementById('desconto');
-            if (!el) return '';
+        """(id) => {
+            const el = document.getElementById(id);
+            if (!el) return { view: '', value: '' };
             const view = el.parentElement && el.parentElement.querySelector('p.viewing-input');
-            const textoView = view ? String(view.innerText || '').trim() : '';
-            const valor = String(el.value || '').trim();
-            return textoView || valor;
-        }"""
+            return {
+                view: view ? String(view.innerText || '').trim() : '',
+                value: String(el.value || '').trim()
+            };
+        }""",
+        campo_id,
     )
+
+
+def ler_natureza_operacao(page: Page) -> str:
+    dados = _texto_campo_view_e_valor(page, "natureza")
+    return (dados.get("view") or dados.get("value") or "").strip()
+
+
+def ler_desconto_atual(page: Page) -> dict:
+    dados = _texto_campo_view_e_valor(page, "desconto")
+    view = (dados.get("view") or "").strip()
+    value = (dados.get("value") or "").strip()
+    return {
+        "view": view,
+        "value": value,
+        "texto": view or value,
+    }
 
 
 def ler_totais(page: Page) -> dict:
@@ -460,11 +574,20 @@ def processar_pedido(page: Page, pedido: dict, p_usuario: float, minimo: float, 
 
     abrir_pedido(page, pedido)
 
-    texto_desconto = ler_desconto_atual(page)
-    if desconto_ja_preenchido(texto_desconto):
-        log.info("Desconto ja preenchido (%s). Pulando.", texto_desconto)
+    natureza = ler_natureza_operacao(page)
+    if natureza_bloqueia_desconto(natureza):
+        log.info("Natureza da operacao bloqueia desconto (%s). Pulando.", natureza)
         voltar_para_lista(page)
-        return "ja_tinha_desconto"
+        return "natureza_terceiros"
+
+    desconto = ler_desconto_atual(page)
+    if desconto_eh_percentual(desconto.get("view"), desconto.get("value")):
+        log.info("Desconto ja esta em percentual (%s). Pulando.", desconto.get("texto"))
+        voltar_para_lista(page)
+        return "ja_tinha_percentual"
+
+    if desconto.get("texto"):
+        log.info("Desconto em valor (%s) sera substituido pelo percentual.", desconto.get("texto"))
 
     totais = ler_totais(page)
     total_atual = parse_numero_br(totais.get("total") or totais.get("viewTotal"))
@@ -480,10 +603,11 @@ def processar_pedido(page: Page, pedido: dict, p_usuario: float, minimo: float, 
         p_max = percentual_maximo(subtotal, extras, minimo)
         p_usar = min(p_usuario, p_max)
         log.info(
-            "SIMULACAO: aplicaria %s (pedido %s, total atual %.2f). Nao salvou.",
+            "SIMULACAO: aplicaria %s (pedido %s, total atual %.2f, desconto atual=%s). Nao salvou.",
             formatar_percentual(p_usar),
             rotulo,
             total_atual,
+            desconto.get("texto") or "vazio",
         )
         voltar_para_lista(page)
         return "simulado"
@@ -564,8 +688,15 @@ def main() -> int:
             if not na_lista(page):
                 log.info("Aba nao esta na lista; voltando para contar os pedidos.")
                 voltar_para_lista(page)
+            info_pag = ler_info_paginacao(page)
             pedidos = listar_pedidos_visiveis(page)
-            log.info("VERIFICACAO OK: aba conectada, pedidos visiveis=%s", len(pedidos))
+            log.info(
+                "VERIFICACAO OK: aba conectada, pagina=%s/%s, pedidos visiveis=%s, tem_proxima=%s",
+                info_pag.get("paginaAtual"),
+                info_pag.get("totalPaginas"),
+                len(pedidos),
+                info_pag.get("temProxima"),
+            )
             log.info("Nenhum clique de edicao/salvar foi executado.")
             return 0
 
@@ -574,47 +705,87 @@ def main() -> int:
                 log.info("Tela de detalhe aberta; voltando para a lista.")
                 voltar_para_lista(page)
 
-            pedidos = listar_pedidos_visiveis(page)
-            if not pedidos:
-                log.info("Nenhum pedido visivel na grid. Encerrando.")
-                return 0
-
-            log.info("Pedidos visiveis na tela: %s", len(pedidos))
             contagem = {
                 "aplicado": 0,
-                "ja_tinha_desconto": 0,
+                "ja_tinha_percentual": 0,
+                "natureza_terceiros": 0,
                 "total_minimo": 0,
                 "sem_edicao": 0,
                 "simulado": 0,
                 "erro": 0,
             }
             erros_seguidos = 0
+            pagina_grid = 0
+            pedidos_processados = 0
+            parar = False
 
-            for i, pedido in enumerate(pedidos, start=1):
-                log.info("Pedido %s/%s", i, len(pedidos))
-                try:
-                    status = processar_pedido(page, pedido, percentual or 0.0, args.minimo, args.simular)
-                    contagem[status] = contagem.get(status, 0) + 1
-                    erros_seguidos = 0
-                except KeyboardInterrupt:
-                    raise
-                except Exception as e:
-                    contagem["erro"] += 1
-                    erros_seguidos += 1
-                    log.exception("Erro no pedido %s: %s", pedido.get("id"), e)
+            while not parar:
+                if not na_lista(page):
+                    voltar_para_lista(page)
+
+                info_pag = ler_info_paginacao(page)
+                pedidos = listar_pedidos_visiveis(page)
+                if not pedidos:
+                    if pagina_grid == 0:
+                        log.info("Nenhum pedido visivel na grid. Encerrando.")
+                    break
+
+                pagina_grid += 1
+                log.info(
+                    "=== Pagina %s/%s | pedidos na tela: %s ===",
+                    info_pag.get("paginaAtual"),
+                    info_pag.get("totalPaginas"),
+                    len(pedidos),
+                )
+
+                for i, pedido in enumerate(pedidos, start=1):
+                    pedidos_processados += 1
+                    log.info(
+                        "Pedido %s/%s (pagina %s/%s)",
+                        i,
+                        len(pedidos),
+                        info_pag.get("paginaAtual"),
+                        info_pag.get("totalPaginas"),
+                    )
                     try:
-                        voltar_para_lista(page)
-                    except Exception:
-                        log.warning("Falha ao voltar para a lista apos erro.")
-                    if erros_seguidos >= MAX_ERROS_SEGUIDOS:
-                        log.error("Muitos erros seguidos. Parando.")
-                        break
+                        status = processar_pedido(
+                            page, pedido, percentual or 0.0, args.minimo, args.simular
+                        )
+                        contagem[status] = contagem.get(status, 0) + 1
+                        erros_seguidos = 0
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        contagem["erro"] += 1
+                        erros_seguidos += 1
+                        log.exception("Erro no pedido %s: %s", pedido.get("id"), e)
+                        try:
+                            voltar_para_lista(page)
+                        except Exception:
+                            log.warning("Falha ao voltar para a lista apos erro.")
+                        if erros_seguidos >= MAX_ERROS_SEGUIDOS:
+                            log.error("Muitos erros seguidos. Parando.")
+                            parar = True
+                            break
 
+                if parar:
+                    break
+
+                if not info_pag.get("temProxima"):
+                    log.info("Ultima pagina do filtro concluida.")
+                    break
+
+                if not ir_para_proxima_pagina(page):
+                    log.warning("Nao foi possivel avancar para a proxima pagina. Encerrando.")
+                    break
+
+            log.info("Pedidos visitados: %s | paginas processadas: %s", pedidos_processados, pagina_grid)
             log.info(
-                "Resumo: aplicados=%s | ja_tinham_desconto=%s | total_minimo=%s | "
-                "sem_edicao=%s | simulados=%s | erros=%s",
+                "Resumo: aplicados=%s | ja_tinham_percentual=%s | natureza_terceiros=%s | "
+                "total_minimo=%s | sem_edicao=%s | simulados=%s | erros=%s",
                 contagem["aplicado"],
-                contagem["ja_tinha_desconto"],
+                contagem["ja_tinha_percentual"],
+                contagem["natureza_terceiros"],
                 contagem["total_minimo"],
                 contagem["sem_edicao"],
                 contagem["simulado"],
