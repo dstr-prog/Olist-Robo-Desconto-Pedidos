@@ -26,6 +26,7 @@ echo.
 echo Informe o percentual de desconto a aplicar em cada pedido.
 echo Exemplos: 10    10,5    10%%
 echo Pula natureza "Venda de mercadorias de terceiros para contribuinte".
+echo Aplica desconto somente se o endereco de entrega for pessoa fisica.
 echo Pula desconto que ja estiver em percentual (sufixo %%).
 echo Desconto em valor (ex: 1,00) sera substituido pelo percentual.
 echo O Total da venda nao ficara abaixo de R$ 10,00.

@@ -112,6 +112,10 @@ def desconto_eh_percentual(*textos: str | None) -> bool:
     return any("%" in str(texto or "") for texto in textos)
 
 
+def somente_digitos(texto: str | None) -> str:
+    return re.sub(r"\D", "", texto or "")
+
+
 def encontrar_pagina_pedidos(browser) -> Page:
     candidatos: list[Page] = []
     for ctx in browser.contexts:
@@ -332,6 +336,41 @@ def _texto_campo_view_e_valor(page: Page, campo_id: str) -> dict:
 def ler_natureza_operacao(page: Page) -> str:
     dados = _texto_campo_view_e_valor(page, "natureza")
     return (dados.get("view") or dados.get("value") or "").strip()
+
+
+def ler_pessoa_entrega(page: Page) -> dict:
+    tipo = _texto_campo_view_e_valor(page, "tipoPessoa_alternativo")
+    cpf = _texto_campo_view_e_valor(page, "cpf_alternativo")
+    cnpj = _texto_campo_view_e_valor(page, "cnpj_alternativo")
+    return {
+        "tipoValue": (tipo.get("value") or "").strip().upper(),
+        "tipoTexto": (tipo.get("view") or tipo.get("value") or "").strip(),
+        "cpf": (cpf.get("view") or cpf.get("value") or "").strip(),
+        "cnpj": (cnpj.get("view") or cnpj.get("value") or "").strip(),
+    }
+
+
+def classificar_pessoa_entrega(dados: dict) -> str:
+    """Retorna 'F' (fisica), 'J' (juridica) ou '?' (indefinido)."""
+    tipo_val = (dados.get("tipoValue") or "").upper()
+    tipo_txt = normalizar_texto(dados.get("tipoTexto"))
+
+    if tipo_val == "J" or tipo_txt == "juridica":
+        return "J"
+    if tipo_val == "F" or tipo_txt == "fisica":
+        return "F"
+
+    cnpj = somente_digitos(dados.get("cnpj"))
+    cpf = somente_digitos(dados.get("cpf"))
+    if len(cnpj) >= 14:
+        return "J"
+    if len(cpf) >= 11:
+        return "F"
+    return "?"
+
+
+def entrega_permite_desconto(dados: dict) -> bool:
+    return classificar_pessoa_entrega(dados) == "F"
 
 
 def ler_desconto_atual(page: Page) -> dict:
@@ -580,6 +619,20 @@ def processar_pedido(page: Page, pedido: dict, p_usuario: float, minimo: float, 
         voltar_para_lista(page)
         return "natureza_terceiros"
 
+    pessoa_entrega = ler_pessoa_entrega(page)
+    if not entrega_permite_desconto(pessoa_entrega):
+        classe = classificar_pessoa_entrega(pessoa_entrega)
+        log.info(
+            "Desconto apenas para pessoa fisica no endereco de entrega. "
+            "Tipo=%s | CPF=%s | CNPJ=%s | classificacao=%s. Pulando.",
+            pessoa_entrega.get("tipoTexto") or pessoa_entrega.get("tipoValue") or "-",
+            pessoa_entrega.get("cpf") or "-",
+            pessoa_entrega.get("cnpj") or "-",
+            classe,
+        )
+        voltar_para_lista(page)
+        return "pessoa_juridica" if classe == "J" else "nao_pessoa_fisica"
+
     desconto = ler_desconto_atual(page)
     if desconto_eh_percentual(desconto.get("view"), desconto.get("value")):
         log.info("Desconto ja esta em percentual (%s). Pulando.", desconto.get("texto"))
@@ -709,6 +762,8 @@ def main() -> int:
                 "aplicado": 0,
                 "ja_tinha_percentual": 0,
                 "natureza_terceiros": 0,
+                "pessoa_juridica": 0,
+                "nao_pessoa_fisica": 0,
                 "total_minimo": 0,
                 "sem_edicao": 0,
                 "simulado": 0,
@@ -782,10 +837,13 @@ def main() -> int:
             log.info("Pedidos visitados: %s | paginas processadas: %s", pedidos_processados, pagina_grid)
             log.info(
                 "Resumo: aplicados=%s | ja_tinham_percentual=%s | natureza_terceiros=%s | "
-                "total_minimo=%s | sem_edicao=%s | simulados=%s | erros=%s",
+                "pessoa_juridica=%s | nao_pessoa_fisica=%s | total_minimo=%s | "
+                "sem_edicao=%s | simulados=%s | erros=%s",
                 contagem["aplicado"],
                 contagem["ja_tinha_percentual"],
                 contagem["natureza_terceiros"],
+                contagem["pessoa_juridica"],
+                contagem["nao_pessoa_fisica"],
                 contagem["total_minimo"],
                 contagem["sem_edicao"],
                 contagem["simulado"],
